@@ -1,80 +1,171 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
 import shutil
 import os
 import uuid
 
+from PIL import Image
+
+from app.services.detection import run_detection
+
+
 app = FastAPI(title="Sonar Debris Detection API")
 
-# Allow frontend (React) to call this backend during development
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten this later to your frontend URL
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
 UPLOAD_DIR = "uploads"
+MAX_FILE_SIZE = 10 * 1024 * 1024
+
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+app.mount(
+    "/uploads",
+    StaticFiles(directory=UPLOAD_DIR),
+    name="uploads"
+)
+
+
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 @app.get("/health")
 def health_check():
-    """Quick check to confirm the server is running."""
-    return {"status": "ok", "message": "Backend is running"}
+
+    return {
+        "status": "ok",
+        "message": "Backend is running"
+    }
 
 
 @app.post("/upload")
-async def upload_sonar_image(file: UploadFile = File(...)):
-    """
-    Accepts a sonar image, saves it locally, and returns its path.
-    No AI processing yet — this just confirms upload works end to end.
-    """
+async def upload_sonar_image(
+    file: UploadFile = File(...)
+):
+
+    if not file.filename:
+        raise HTTPException(
+            status_code=400,
+            detail="No file was provided."
+        )
+
+    file_ext = os.path.splitext(file.filename)[1].lower()
+
+    # Read file to check its size
+    file_content = await file.read()
+
+    if len(file_content) > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail="File too large. Maximum allowed size is 10 MB."
+        )
+
+    await file.seek(0)
+
+    # Check whether the uploaded file is a real, readable image
+    try:
+        image = Image.open(file.file)
+        image.verify()
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid image file. Please upload a valid JPG, JPEG, PNG, or WEBP image."
+        )
+
+    await file.seek(0)
+
+    # Check allowed file extension
+    if file_ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid file type. Please upload JPG, JPEG, PNG, or WEBP."
+        )
+
     file_id = str(uuid.uuid4())
-    file_ext = os.path.splitext(file.filename)[1]
+
     saved_filename = f"{file_id}{file_ext}"
-    saved_path = os.path.join(UPLOAD_DIR, saved_filename)
+
+    saved_path = os.path.join(
+        UPLOAD_DIR,
+        saved_filename
+    )
 
     with open(saved_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+
+        shutil.copyfileobj(
+            file.file,
+            buffer
+        )
 
     return {
         "status": "success",
         "original_filename": file.filename,
         "saved_as": saved_filename,
         "file_id": file_id,
-        "message": "Image uploaded successfully. Detection not yet connected."
+        "message": "Image uploaded successfully."
     }
 
 
 @app.get("/detect/{file_id}")
-def detect_placeholder(file_id: str):
-    """
-    Placeholder for the future YOLO detection route.
-    Returns dummy data so the frontend can be built against this shape now.
-    Replace the body of this function with real YOLO inference later —
-    keep the response shape the same so the frontend doesn't need changes.
-    """
+def detect_file(file_id: str):
+
+    matching_files = [
+        os.path.join(
+            UPLOAD_DIR,
+            filename
+        )
+        for filename in os.listdir(UPLOAD_DIR)
+        if filename.startswith(file_id + ".")
+    ]
+
+    if not matching_files:
+        raise HTTPException(
+            status_code=404,
+            detail="Uploaded file not found."
+        )
+
+    file_path = matching_files[0]
+
+    try:
+
+        detection_result = run_detection(
+            file_path
+        )
+
+    except Exception as e:
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Detection failed: {str(e)}"
+        )
+
+    annotated_path = detection_result[
+        "annotated_image"
+    ]
+
+    annotated_filename = os.path.basename(
+        annotated_path
+    )
+
+    annotated_url = (
+        f"/uploads/{annotated_filename}"
+    )
+
     return {
+        "status": "success",
         "file_id": file_id,
-        "detections": [
-            {
-                "object_id": 1,
-                "type": "ghost_net",
-                "confidence": 0.92,
-                "bbox": [120, 80, 260, 190],
-                "lat": 19.0760,
-                "long": 72.8777,
-                "estimated_size_m": "12.4 x 4.1"
-            },
-            {
-                "object_id": 2,
-                "type": "shipwreck",
-                "confidence": 0.87,
-                "bbox": [300, 150, 480, 320],
-                "lat": 19.0800,
-                "long": 72.8801,
-                "estimated_size_m": "20.0 x 8.2"
-            }
-        ]
+        "image_width": detection_result["image_width"],
+        "image_height": detection_result["image_height"],
+        "detection_count": len(detection_result["detections"]),
+        "detections": detection_result["detections"],
+        "annotated_image": annotated_url
     }

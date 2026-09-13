@@ -1,23 +1,57 @@
-"""
-YOLO detection service.
-
-Fill this in during Phase 5, once you have a trained model (.pt file)
-from ml-training/. Load the model ONCE at startup, not per-request.
-
-Example starting point:
-
 from ultralytics import YOLO
+import os
+import cv2
 
-model = YOLO("app/models/yolo_model.pt")
+MODEL_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    "models",
+    "best.pt"
+)
+
+model = YOLO(MODEL_PATH)
+
 
 def run_detection(image_path: str):
-    results = model(image_path)
+
+    results = model.predict(
+        source=image_path,
+        conf=0.15
+    )
+
     detections = []
-    for box in results[0].boxes:
-        detections.append({
-            "type": model.names[int(box.cls)],
-            "confidence": float(box.conf),
-            "bbox": box.xyxy.tolist()[0],
-        })
-    return detections
-"""
+
+    for result in results:
+
+        image_height, image_width = result.orig_shape
+
+        annotated_image = result.plot()
+
+        base_name = os.path.splitext(image_path)[0]
+        annotated_path = base_name + "_annotated.jpg"
+
+        cv2.imwrite(annotated_path, annotated_image)
+
+        for box in result.boxes:
+
+            cls_id = int(box.cls[0])
+            confidence = float(box.conf[0])
+
+            x1, y1, x2, y2 = map(float, box.xyxy[0])
+
+            detections.append({
+                "object_type": model.names[cls_id],
+                "confidence": confidence,
+                "bbox": {
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2
+                }
+            })
+
+    return {
+        "image_width": image_width,
+        "image_height": image_height,
+        "detections": detections,
+        "annotated_image": annotated_path
+    }
